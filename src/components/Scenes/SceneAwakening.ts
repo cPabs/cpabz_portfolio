@@ -1,28 +1,53 @@
 import { Scene, InputState, Vec2 } from '@/types';
 import { COLORS } from '@/utils/colors';
-import { distance } from '@/utils/math';
-import { drawVignette, drawGlow } from '@/utils/drawing';
-import { createSkeleton, updateSkeleton, renderSkeleton, SkeletonState } from '@/entities/Skeleton';
+import { distance, lerp, randomInRange, clamp, smoothstep } from '@/utils/math';
+import { drawGlow, colorWithAlpha } from '@/utils/drawing';
+import {
+  PixelPersonState, createPixelPerson, updatePixelPerson, renderPixelPerson,
+  PixelSkeletonState, createPixelSkeleton, renderPixelSkeleton,
+} from '@/entities/PixelCharacter';
 import { ParticleSystem } from '@/systems/ParticleSystem';
+
+// Ambient text that floats before activation
+interface FloatingText {
+  text: string;
+  x: number;
+  y: number;
+  alpha: number;
+  targetAlpha: number;
+  startTime: number;
+  duration: number;
+}
 
 export class SceneAwakening implements Scene {
   id = 'awakening' as const;
-  private skeleton!: SkeletonState;
-  private particles = new ParticleSystem(50);
+
+  // Crowd
+  private crowd: PixelPersonState[] = [];
+  private crowdSpeedMult = 1;
+
+  // Skeleton
+  private skeleton!: PixelSkeletonState;
+
+  // State
   private complete = false;
   private awoken = false;
-  private awakening = false;
-  private awakeTimer = 0;
+  private activationTimer = 0;
   private width = 0;
   private height = 0;
   private time = 0;
-  private speechShown = false;
+  private particles = new ParticleSystem(40);
+
+  // Ambient text
+  private floatingTexts: FloatingText[] = [];
+  private textPhase = 0;
+  private textShown = false;
+
+  // Callbacks
   private onSpeech: ((text: string) => void) | null = null;
   private onComplete: (() => void) | null = null;
   private audioManager: { playSFX: (t: string) => void; startLayer: (id: string, vol?: number) => void } | null = null;
-  private speechDismissTimer = 0;
-  private ambientParticleTimer = 0;
-  private jitterAmount = 0;
+  private completionTimer = 0;
 
   constructor(
     onSpeech?: (text: string) => void,
@@ -34,134 +59,214 @@ export class SceneAwakening implements Scene {
     this.audioManager = audioManager || null;
   }
 
-  init(ctx: CanvasRenderingContext2D, width: number, height: number) {
+  init(_ctx: CanvasRenderingContext2D, width: number, height: number) {
     this.width = width;
     this.height = height;
-    this.skeleton = createSkeleton(width / 2, height / 2 + 40);
-    this.skeleton.slump = 1;
-    this.skeleton.eyeGlow = 0;
     this.complete = false;
     this.awoken = false;
-    this.awakening = false;
-    this.speechShown = false;
+    this.activationTimer = 0;
     this.time = 0;
+    this.textPhase = 0;
+    this.textShown = false;
+    this.crowdSpeedMult = 1;
+
+    // Skeleton — bottom-right, sitting
+    const skX = width * 0.78;
+    const skY = height * 0.72;
+    this.skeleton = createPixelSkeleton(skX, skY);
+
+    // Crowd — spread across screen, avoiding skeleton zone
+    const isMobile = width < 640;
+    const crowdCount = isMobile ? 18 : 35;
+    this.crowd = [];
+
+    const groundY = height * 0.65;
+    for (let i = 0; i < crowdCount; i++) {
+      const x = randomInRange(-100, width + 100);
+      const y = groundY + randomInRange(-height * 0.08, height * 0.2);
+      const scale = 0.8 + (y - groundY + height * 0.08) / (height * 0.28) * 0.8; // depth scaling
+
+      // Skip if too close to skeleton zone
+      if (x > width * 0.65 && y > height * 0.55) {
+        if (Math.random() < 0.7) continue;
+      }
+
+      const person = createPixelPerson(x, y, scale);
+      this.crowd.push(person);
+    }
+
+    // Sort crowd by Y for depth ordering
+    this.crowd.sort((a, b) => a.y - b.y);
+
+    // Ambient text schedule
+    this.floatingTexts = [
+      { text: 'it got… loud.', x: width * 0.15, y: height * 0.35, alpha: 0, targetAlpha: 0, startTime: 3, duration: 3 },
+      { text: 'everything kept moving.', x: width * 0.12, y: height * 0.42, alpha: 0, targetAlpha: 0, startTime: 7, duration: 3 },
+      { text: 'i stopped.', x: width * 0.18, y: height * 0.38, alpha: 0, targetAlpha: 0, startTime: 11, duration: 3 },
+    ];
+
     this.audioManager?.startLayer('ambient', 0.2);
   }
 
   update(dt: number, input: InputState) {
     this.time += dt;
 
-    const skeletonPos: Vec2 = { x: this.skeleton.x, y: this.skeleton.y - 50 };
-    const dist = distance(input.mouse, skeletonPos);
+    // === PROXIMITY CALCULATION ===
+    const skPos: Vec2 = { x: this.skeleton.x, y: this.skeleton.y - 20 };
+    const dist = distance(input.mouse, skPos);
+    const zoneFactor = Math.min(this.width, this.height) / 900;
+    const scaledDist = dist / Math.max(zoneFactor, 0.5);
 
-    // Screen jitter based on proximity
-    this.jitterAmount = dist < 200 ? (1 - dist / 200) * 3 : 0;
+    // 4 proximity zones → crowd speed multiplier
+    let targetMult = 1;
+    if (scaledDist < 100) targetMult = 0.03;
+    else if (scaledDist < 200) targetMult = 0.25;
+    else if (scaledDist < 350) targetMult = 0.65;
+    this.crowdSpeedMult = lerp(this.crowdSpeedMult, targetMult, dt * 2);
 
-    if (!this.awoken && !this.awakening) {
-      // Proximity-based eye glow
-      if (dist < 200) {
-        this.skeleton.eyeGlow = Math.min(1, (200 - dist) / 200);
-      } else {
-        this.skeleton.eyeGlow = Math.max(0, this.skeleton.eyeGlow - dt * 2);
-      }
+    // Proximity factor for skeleton (0-1, 1 = very close)
+    const proximity = scaledDist < 100 ? 1 : scaledDist < 200 ? (200 - scaledDist) / 100 : 0;
 
-      // Trigger awakening
-      if (dist < 50) {
-        this.awakening = true;
-        this.awakeTimer = 0;
-        this.audioManager?.playSFX('discovery');
-      }
-    }
+    // === SKELETON ===
+    if (!this.awoken) {
+      // Eye glow ramps with proximity
+      this.skeleton.eyeGlow = lerp(this.skeleton.eyeGlow, proximity > 0.2 ? proximity : 0, dt * 4);
 
-    if (this.awakening) {
-      this.awakeTimer += dt;
-      this.skeleton.eyeGlow = 1;
+      // Head tilt follows proximity
+      this.skeleton.headTilt = lerp(this.skeleton.headTilt, proximity > 0.3 ? proximity * 0.8 : 0, dt * 2);
 
-      // Gradual stand up
-      if (this.awakeTimer > 0.3) {
-        this.skeleton.slump = Math.max(0, this.skeleton.slump - dt * 1.5);
-      }
-
-      if (this.skeleton.slump <= 0 && !this.awoken) {
-        this.awoken = true;
-        this.skeleton.isAwake = true;
-        this.skeleton.followSpeed = 0.03;
-
-        if (!this.speechShown) {
-          this.speechShown = true;
+      // Activation: stay very close for 2 seconds
+      if (proximity >= 0.9) {
+        this.activationTimer += dt;
+        if (this.activationTimer >= 2) {
+          this.awoken = true;
+          this.skeleton.isAwake = true;
+          this.skeleton.eyeGlow = 1;
+          this.skeleton.headTilt = 1;
+          this.skeleton.slump = 0;
+          this.audioManager?.playSFX('discovery');
           this.onSpeech?.('oh… you found me.');
-          this.speechDismissTimer = 3;
+          this.completionTimer = 3.5;
         }
-      }
-    }
-
-    if (this.awoken) {
-      this.skeleton = updateSkeleton(this.skeleton, dt, input.mouse);
-      this.skeleton.targetY = Math.min(input.mouse.y + 60, this.height - 80);
-
-      // After speech shown, wait then complete
-      if (this.speechShown) {
-        this.speechDismissTimer -= dt;
-        if (this.speechDismissTimer <= 0 && !this.complete) {
-          this.complete = true;
-          this.onComplete?.();
-        }
+      } else {
+        this.activationTimer = Math.max(0, this.activationTimer - dt * 0.5);
       }
     } else {
-      this.skeleton = updateSkeleton(this.skeleton, dt, null);
+      // Post-activation
+      this.skeleton.slump = lerp(this.skeleton.slump, 0, dt * 2);
+      this.skeleton.breathPhase += dt;
+      this.completionTimer -= dt;
+      if (this.completionTimer <= 0 && !this.complete) {
+        this.complete = true;
+        this.onComplete?.();
+      }
+    }
+    this.skeleton.bobPhase += dt;
+
+    // === CROWD ===
+    for (const person of this.crowd) {
+      person.currentSpeed = lerp(person.currentSpeed, person.speed * this.crowdSpeedMult, dt * 3);
+      updatePixelPerson(person, dt);
+
+      // Wrap around screen edges
+      if (person.direction > 0 && person.x > this.width + 80) {
+        person.x = -60;
+      } else if (person.direction < 0 && person.x < -80) {
+        person.x = this.width + 60;
+      }
+
+      // Fade out near edges
+      if (person.x < 30) person.alpha = person.x / 30;
+      else if (person.x > this.width - 30) person.alpha = (this.width - person.x) / 30;
+      else person.alpha = 1;
     }
 
-    // Ambient particles
-    this.ambientParticleTimer -= dt;
-    if (this.ambientParticleTimer <= 0) {
-      this.ambientParticleTimer = 0.5 + Math.random();
-      this.particles.emitDust(
-        Math.random() * this.width,
-        this.height * 0.3 + Math.random() * this.height * 0.5,
-        1
-      );
+    // === AMBIENT TEXT ===
+    if (!this.awoken) {
+      for (const ft of this.floatingTexts) {
+        if (this.time >= ft.startTime && this.time < ft.startTime + ft.duration) {
+          const localT = this.time - ft.startTime;
+          if (localT < 0.8) ft.targetAlpha = localT / 0.8;
+          else if (localT > ft.duration - 0.8) ft.targetAlpha = (ft.duration - localT) / 0.8;
+          else ft.targetAlpha = 1;
+        } else {
+          ft.targetAlpha = 0;
+        }
+        ft.alpha = lerp(ft.alpha, ft.targetAlpha * 0.45, dt * 4);
+      }
+    } else {
+      for (const ft of this.floatingTexts) {
+        ft.alpha = lerp(ft.alpha, 0, dt * 5);
+      }
     }
 
     this.particles.update(dt);
   }
 
   render(ctx: CanvasRenderingContext2D, width: number, height: number) {
-    // Background
-    ctx.fillStyle = COLORS.void;
+    // === BACKGROUND ===
+    const bg = ctx.createLinearGradient(0, 0, 0, height);
+    bg.addColorStop(0, '#0c0c18');
+    bg.addColorStop(0.6, '#10101e');
+    bg.addColorStop(1, '#0a0a14');
+    ctx.fillStyle = bg;
     ctx.fillRect(0, 0, width, height);
 
-    // Subtle jitter
-    ctx.save();
-    if (this.jitterAmount > 0) {
-      ctx.translate(
-        (Math.random() - 0.5) * this.jitterAmount,
-        (Math.random() - 0.5) * this.jitterAmount
-      );
+    // Subtle ground line
+    const groundY = height * 0.85;
+    ctx.strokeStyle = 'rgba(100, 116, 139, 0.08)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, groundY);
+    ctx.lineTo(width, groundY);
+    ctx.stroke();
+
+    // === RADIAL DARKNESS (bottom-right) ===
+    const vigCx = width * 0.78;
+    const vigCy = height * 0.72;
+    const vigRadius = Math.max(width, height) * 0.45;
+    const vigGrad = ctx.createRadialGradient(vigCx, vigCy, 0, vigCx, vigCy, vigRadius);
+    vigGrad.addColorStop(0, 'rgba(5, 5, 12, 0.7)');
+    vigGrad.addColorStop(0.3, 'rgba(5, 5, 12, 0.3)');
+    vigGrad.addColorStop(1, 'rgba(5, 5, 12, 0)');
+    ctx.fillStyle = vigGrad;
+    ctx.fillRect(0, 0, width, height);
+
+    // === AMBIENT TEXT ===
+    for (const ft of this.floatingTexts) {
+      if (ft.alpha < 0.01) continue;
+      ctx.save();
+      ctx.globalAlpha = ft.alpha;
+      ctx.font = `${Math.max(12, Math.min(15, width * 0.012))}px system-ui, -apple-system, sans-serif`;
+      ctx.fillStyle = '#94a3b8';
+      ctx.textAlign = 'left';
+      ctx.letterSpacing = '3px';
+      ctx.fillText(ft.text, ft.x, ft.y);
+      ctx.restore();
     }
 
-    // Soft center glow when awake
-    if (this.awoken) {
-      drawGlow(ctx, this.skeleton.x, this.skeleton.y - 30, 200, COLORS.eyeGlow, 0.05);
+    // === CROWD (sorted by Y for depth) ===
+    for (const person of this.crowd) {
+      renderPixelPerson(ctx, person);
     }
 
-    // Particles
-    this.particles.render(ctx);
+    // === SKELETON ===
+    // Subtle rim light behind skeleton
+    if (this.skeleton.eyeGlow > 0.05) {
+      drawGlow(ctx, this.skeleton.x, this.skeleton.y - 20, 60, '#7dd3fc', this.skeleton.eyeGlow * 0.08);
+    }
+    renderPixelSkeleton(ctx, this.skeleton);
 
-    // Skeleton
-    renderSkeleton(ctx, this.skeleton, { hasHeart: false, hasBrain: false, hasBody: false }, null);
-
-    ctx.restore();
-
-    // Vignette
-    drawVignette(ctx, width, height, 0.8);
+    // === OVERALL VIGNETTE ===
+    const vig = ctx.createRadialGradient(width / 2, height / 2, width * 0.25, width / 2, height / 2, width * 0.8);
+    vig.addColorStop(0, 'rgba(0,0,0,0)');
+    vig.addColorStop(1, 'rgba(0,0,0,0.5)');
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, width, height);
   }
 
-  cleanup() {
-    this.particles.clear();
-  }
-
+  cleanup() { this.particles.clear(); }
   isComplete() { return this.complete; }
-
   onResize(width: number, height: number) {
     this.width = width;
     this.height = height;
