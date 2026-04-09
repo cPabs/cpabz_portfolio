@@ -1,6 +1,5 @@
 import { Scene, InputState, Vec2 } from '@/types';
-import { COLORS } from '@/utils/colors';
-import { distance, lerp, randomInRange, clamp, smoothstep } from '@/utils/math';
+import { distance, lerp, randomInRange } from '@/utils/math';
 import { drawGlow, colorWithAlpha } from '@/utils/drawing';
 import {
   PixelPersonState, createPixelPerson, updatePixelPerson, renderPixelPerson,
@@ -8,7 +7,6 @@ import {
 } from '@/entities/PixelCharacter';
 import { ParticleSystem } from '@/systems/ParticleSystem';
 
-// Ambient text that floats before activation
 interface FloatingText {
   text: string;
   x: number;
@@ -22,14 +20,10 @@ interface FloatingText {
 export class SceneAwakening implements Scene {
   id = 'awakening' as const;
 
-  // Crowd
   private crowd: PixelPersonState[] = [];
   private crowdSpeedMult = 1;
-
-  // Skeleton
   private skeleton!: PixelSkeletonState;
 
-  // State
   private complete = false;
   private awoken = false;
   private activationTimer = 0;
@@ -38,12 +32,7 @@ export class SceneAwakening implements Scene {
   private time = 0;
   private particles = new ParticleSystem(40);
 
-  // Ambient text
   private floatingTexts: FloatingText[] = [];
-  private textPhase = 0;
-  private textShown = false;
-
-  // Callbacks
   private onSpeech: ((text: string) => void) | null = null;
   private onComplete: (() => void) | null = null;
   private audioManager: { playSFX: (t: string) => void; startLayer: (id: string, vol?: number) => void } | null = null;
@@ -66,43 +55,46 @@ export class SceneAwakening implements Scene {
     this.awoken = false;
     this.activationTimer = 0;
     this.time = 0;
-    this.textPhase = 0;
-    this.textShown = false;
     this.crowdSpeedMult = 1;
 
     // Skeleton — bottom-right, sitting
-    const skX = width * 0.78;
-    const skY = height * 0.72;
-    this.skeleton = createPixelSkeleton(skX, skY);
+    this.skeleton = createPixelSkeleton(width * 0.80, height * 0.78, height);
 
-    // Crowd — spread across screen, avoiding skeleton zone
+    // === DENSE CROWD ===
+    // Multiple lanes/rows from top to bottom, filling ~70% of screen
     const isMobile = width < 640;
-    const crowdCount = isMobile ? 18 : 35;
+    const laneCount = isMobile ? 6 : 8;
+    const peoplePerLane = isMobile ? 6 : 9;
     this.crowd = [];
 
-    const groundY = height * 0.65;
-    for (let i = 0; i < crowdCount; i++) {
-      const x = randomInRange(-100, width + 100);
-      const y = groundY + randomInRange(-height * 0.08, height * 0.2);
-      const scale = 0.8 + (y - groundY + height * 0.08) / (height * 0.28) * 0.8; // depth scaling
+    for (let lane = 0; lane < laneCount; lane++) {
+      // Each lane is a horizontal row at a different Y depth
+      const laneProgress = lane / (laneCount - 1); // 0 = top, 1 = bottom
+      const laneY = height * 0.18 + laneProgress * height * 0.65;
+      const depthScale = 0.5 + laneProgress * 0.7; // smaller at top, bigger at bottom
 
-      // Skip if too close to skeleton zone
-      if (x > width * 0.65 && y > height * 0.55) {
-        if (Math.random() < 0.7) continue;
+      for (let i = 0; i < peoplePerLane; i++) {
+        const x = randomInRange(-80, width + 80);
+        const yJitter = randomInRange(-height * 0.02, height * 0.02);
+
+        // Skip characters that overlap skeleton dark zone
+        if (x > width * 0.62 && laneY + yJitter > height * 0.55) {
+          if (Math.random() < 0.75) continue;
+        }
+
+        const person = createPixelPerson(x, laneY + yJitter, depthScale, height);
+        this.crowd.push(person);
       }
-
-      const person = createPixelPerson(x, y, scale);
-      this.crowd.push(person);
     }
 
-    // Sort crowd by Y for depth ordering
+    // Sort by Y for depth ordering
     this.crowd.sort((a, b) => a.y - b.y);
 
-    // Ambient text schedule
+    // Ambient text
     this.floatingTexts = [
-      { text: 'it got… loud.', x: width * 0.15, y: height * 0.35, alpha: 0, targetAlpha: 0, startTime: 3, duration: 3 },
-      { text: 'everything kept moving.', x: width * 0.12, y: height * 0.42, alpha: 0, targetAlpha: 0, startTime: 7, duration: 3 },
-      { text: 'i stopped.', x: width * 0.18, y: height * 0.38, alpha: 0, targetAlpha: 0, startTime: 11, duration: 3 },
+      { text: 'it got… loud.', x: width * 0.52, y: height * 0.28, alpha: 0, targetAlpha: 0, startTime: 3, duration: 3 },
+      { text: 'everything kept moving.', x: width * 0.48, y: height * 0.45, alpha: 0, targetAlpha: 0, startTime: 7, duration: 3 },
+      { text: 'i stopped.', x: width * 0.65, y: height * 0.62, alpha: 0, targetAlpha: 0, startTime: 11, duration: 3 },
     ];
 
     this.audioManager?.startLayer('ambient', 0.2);
@@ -111,31 +103,25 @@ export class SceneAwakening implements Scene {
   update(dt: number, input: InputState) {
     this.time += dt;
 
-    // === PROXIMITY CALCULATION ===
-    const skPos: Vec2 = { x: this.skeleton.x, y: this.skeleton.y - 20 };
+    // === PROXIMITY ===
+    const skPos: Vec2 = { x: this.skeleton.x, y: this.skeleton.y - 30 };
     const dist = distance(input.mouse, skPos);
     const zoneFactor = Math.min(this.width, this.height) / 900;
     const scaledDist = dist / Math.max(zoneFactor, 0.5);
 
-    // 4 proximity zones → crowd speed multiplier
     let targetMult = 1;
     if (scaledDist < 100) targetMult = 0.03;
-    else if (scaledDist < 200) targetMult = 0.25;
-    else if (scaledDist < 350) targetMult = 0.65;
-    this.crowdSpeedMult = lerp(this.crowdSpeedMult, targetMult, dt * 2);
+    else if (scaledDist < 200) targetMult = 0.2;
+    else if (scaledDist < 350) targetMult = 0.6;
+    this.crowdSpeedMult = lerp(this.crowdSpeedMult, targetMult, dt * 2.5);
 
-    // Proximity factor for skeleton (0-1, 1 = very close)
     const proximity = scaledDist < 100 ? 1 : scaledDist < 200 ? (200 - scaledDist) / 100 : 0;
 
     // === SKELETON ===
     if (!this.awoken) {
-      // Eye glow ramps with proximity
       this.skeleton.eyeGlow = lerp(this.skeleton.eyeGlow, proximity > 0.2 ? proximity : 0, dt * 4);
-
-      // Head tilt follows proximity
       this.skeleton.headTilt = lerp(this.skeleton.headTilt, proximity > 0.3 ? proximity * 0.8 : 0, dt * 2);
 
-      // Activation: stay very close for 2 seconds
       if (proximity >= 0.9) {
         this.activationTimer += dt;
         if (this.activationTimer >= 2) {
@@ -152,7 +138,6 @@ export class SceneAwakening implements Scene {
         this.activationTimer = Math.max(0, this.activationTimer - dt * 0.5);
       }
     } else {
-      // Post-activation
       this.skeleton.slump = lerp(this.skeleton.slump, 0, dt * 2);
       this.skeleton.breathPhase += dt;
       this.completionTimer -= dt;
@@ -168,16 +153,16 @@ export class SceneAwakening implements Scene {
       person.currentSpeed = lerp(person.currentSpeed, person.speed * this.crowdSpeedMult, dt * 3);
       updatePixelPerson(person, dt);
 
-      // Wrap around screen edges
-      if (person.direction > 0 && person.x > this.width + 80) {
-        person.x = -60;
-      } else if (person.direction < 0 && person.x < -80) {
-        person.x = this.width + 60;
+      // Wrap around
+      if (person.direction > 0 && person.x > this.width + 100) {
+        person.x = -80;
+      } else if (person.direction < 0 && person.x < -100) {
+        person.x = this.width + 80;
       }
 
-      // Fade out near edges
-      if (person.x < 30) person.alpha = person.x / 30;
-      else if (person.x > this.width - 30) person.alpha = (this.width - person.x) / 30;
+      // Fade at edges
+      if (person.x < 40) person.alpha = Math.max(0, person.x / 40);
+      else if (person.x > this.width - 40) person.alpha = Math.max(0, (this.width - person.x) / 40);
       else person.alpha = 1;
     }
 
@@ -192,7 +177,7 @@ export class SceneAwakening implements Scene {
         } else {
           ft.targetAlpha = 0;
         }
-        ft.alpha = lerp(ft.alpha, ft.targetAlpha * 0.45, dt * 4);
+        ft.alpha = lerp(ft.alpha, ft.targetAlpha * 0.55, dt * 4);
       }
     } else {
       for (const ft of this.floatingTexts) {
@@ -204,64 +189,82 @@ export class SceneAwakening implements Scene {
   }
 
   render(ctx: CanvasRenderingContext2D, width: number, height: number) {
-    // === BACKGROUND ===
-    const bg = ctx.createLinearGradient(0, 0, 0, height);
-    bg.addColorStop(0, '#0c0c18');
-    bg.addColorStop(0.6, '#10101e');
-    bg.addColorStop(1, '#0a0a14');
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, width, height);
+    // === BACKGROUND: warm ground (Minecraft grass/dirt feel) ===
+    // Sky
+    const sky = ctx.createLinearGradient(0, 0, 0, height * 0.35);
+    sky.addColorStop(0, '#87CEEB');
+    sky.addColorStop(1, '#b8d9e8');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, width, height * 0.35);
 
-    // Subtle ground line
-    const groundY = height * 0.85;
-    ctx.strokeStyle = 'rgba(100, 116, 139, 0.08)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, groundY);
-    ctx.lineTo(width, groundY);
-    ctx.stroke();
+    // Ground gradient (grass → dirt)
+    const ground = ctx.createLinearGradient(0, height * 0.12, 0, height);
+    ground.addColorStop(0, '#7dad5a');
+    ground.addColorStop(0.15, '#6b9b4a');
+    ground.addColorStop(0.5, '#8b9a5c');
+    ground.addColorStop(1, '#7a8850');
+    ctx.fillStyle = ground;
+    ctx.fillRect(0, height * 0.12, width, height * 0.88);
 
-    // === RADIAL DARKNESS (bottom-right) ===
-    const vigCx = width * 0.78;
-    const vigCy = height * 0.72;
-    const vigRadius = Math.max(width, height) * 0.45;
-    const vigGrad = ctx.createRadialGradient(vigCx, vigCy, 0, vigCx, vigCy, vigRadius);
-    vigGrad.addColorStop(0, 'rgba(5, 5, 12, 0.7)');
-    vigGrad.addColorStop(0.3, 'rgba(5, 5, 12, 0.3)');
-    vigGrad.addColorStop(1, 'rgba(5, 5, 12, 0)');
+    // Subtle path lines (horizontal walking lanes)
+    ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 6; i++) {
+      const pathY = height * 0.2 + i * height * 0.12;
+      ctx.beginPath();
+      ctx.moveTo(0, pathY);
+      ctx.lineTo(width, pathY);
+      ctx.stroke();
+    }
+
+    // Dirt path texture (subtle dots)
+    ctx.fillStyle = 'rgba(120, 100, 60, 0.08)';
+    for (let i = 0; i < 60; i++) {
+      const dx = (i * 137 + 50) % width;
+      const dy = height * 0.15 + ((i * 97 + 30) % (height * 0.75));
+      ctx.fillRect(dx, dy, 3, 3);
+    }
+
+    // === RADIAL DARKNESS (bottom-right skeleton zone) ===
+    const vigCx = width * 0.82;
+    const vigCy = height * 0.78;
+    const vigRadius = Math.max(width, height) * 0.38;
+    const vigGrad = ctx.createRadialGradient(vigCx, vigCy, vigRadius * 0.05, vigCx, vigCy, vigRadius);
+    vigGrad.addColorStop(0, 'rgba(5, 5, 15, 0.85)');
+    vigGrad.addColorStop(0.4, 'rgba(5, 5, 15, 0.6)');
+    vigGrad.addColorStop(0.7, 'rgba(5, 5, 15, 0.2)');
+    vigGrad.addColorStop(1, 'rgba(5, 5, 15, 0)');
     ctx.fillStyle = vigGrad;
     ctx.fillRect(0, 0, width, height);
+
+    // === CROWD ===
+    for (const person of this.crowd) {
+      renderPixelPerson(ctx, person, height);
+    }
 
     // === AMBIENT TEXT ===
     for (const ft of this.floatingTexts) {
       if (ft.alpha < 0.01) continue;
       ctx.save();
       ctx.globalAlpha = ft.alpha;
-      ctx.font = `${Math.max(12, Math.min(15, width * 0.012))}px system-ui, -apple-system, sans-serif`;
-      ctx.fillStyle = '#94a3b8';
+      ctx.font = `${Math.max(13, Math.min(16, width * 0.013))}px system-ui, -apple-system, sans-serif`;
+      ctx.fillStyle = '#e2e8f0';
       ctx.textAlign = 'left';
-      ctx.letterSpacing = '3px';
       ctx.fillText(ft.text, ft.x, ft.y);
       ctx.restore();
     }
 
-    // === CROWD (sorted by Y for depth) ===
-    for (const person of this.crowd) {
-      renderPixelPerson(ctx, person);
-    }
-
     // === SKELETON ===
-    // Subtle rim light behind skeleton
     if (this.skeleton.eyeGlow > 0.05) {
-      drawGlow(ctx, this.skeleton.x, this.skeleton.y - 20, 60, '#7dd3fc', this.skeleton.eyeGlow * 0.08);
+      drawGlow(ctx, this.skeleton.x, this.skeleton.y - 35, 70, '#7dd3fc', this.skeleton.eyeGlow * 0.1);
     }
-    renderPixelSkeleton(ctx, this.skeleton);
+    renderPixelSkeleton(ctx, this.skeleton, height);
 
-    // === OVERALL VIGNETTE ===
-    const vig = ctx.createRadialGradient(width / 2, height / 2, width * 0.25, width / 2, height / 2, width * 0.8);
-    vig.addColorStop(0, 'rgba(0,0,0,0)');
-    vig.addColorStop(1, 'rgba(0,0,0,0.5)');
-    ctx.fillStyle = vig;
+    // === EDGE VIGNETTE ===
+    const edgeVig = ctx.createRadialGradient(width / 2, height / 2, width * 0.3, width / 2, height / 2, width * 0.85);
+    edgeVig.addColorStop(0, 'rgba(0,0,0,0)');
+    edgeVig.addColorStop(1, 'rgba(0,0,0,0.35)');
+    ctx.fillStyle = edgeVig;
     ctx.fillRect(0, 0, width, height);
   }
 
