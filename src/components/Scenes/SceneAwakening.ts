@@ -38,6 +38,10 @@ export class SceneAwakening implements Scene {
   private audioManager: { playSFX: (t: string) => void; startLayer: (id: string, vol?: number) => void } | null = null;
   private completionTimer = 0;
 
+  // Background image
+  private bgImage: HTMLImageElement | null = null;
+  private bgLoaded = false;
+
   constructor(
     onSpeech?: (text: string) => void,
     onComplete?: () => void,
@@ -96,6 +100,13 @@ export class SceneAwakening implements Scene {
       { text: 'everything kept moving.', x: width * 0.48, y: height * 0.45, alpha: 0, targetAlpha: 0, startTime: 7, duration: 3 },
       { text: 'i stopped.', x: width * 0.65, y: height * 0.62, alpha: 0, targetAlpha: 0, startTime: 11, duration: 3 },
     ];
+
+    // Load background image
+    if (!this.bgImage) {
+      this.bgImage = new Image();
+      this.bgImage.onload = () => { this.bgLoaded = true; };
+      this.bgImage.src = '/images/hero-bg.png';
+    }
 
     this.audioManager?.startLayer('ambient', 0.2);
   }
@@ -189,40 +200,45 @@ export class SceneAwakening implements Scene {
   }
 
   render(ctx: CanvasRenderingContext2D, width: number, height: number) {
-    // === BACKGROUND: warm ground (Minecraft grass/dirt feel) ===
-    // Sky
-    const sky = ctx.createLinearGradient(0, 0, 0, height * 0.35);
-    sky.addColorStop(0, '#87CEEB');
-    sky.addColorStop(1, '#b8d9e8');
-    ctx.fillStyle = sky;
-    ctx.fillRect(0, 0, width, height * 0.35);
+    // === BACKGROUND IMAGE (cover the viewport) ===
+    if (this.bgLoaded && this.bgImage) {
+      // Cover: fill viewport while maintaining aspect ratio
+      const imgW = this.bgImage.naturalWidth;
+      const imgH = this.bgImage.naturalHeight;
+      const imgAspect = imgW / imgH;
+      const vpAspect = width / height;
 
-    // Ground gradient (grass → dirt)
-    const ground = ctx.createLinearGradient(0, height * 0.12, 0, height);
-    ground.addColorStop(0, '#7dad5a');
-    ground.addColorStop(0.15, '#6b9b4a');
-    ground.addColorStop(0.5, '#8b9a5c');
-    ground.addColorStop(1, '#7a8850');
-    ctx.fillStyle = ground;
-    ctx.fillRect(0, height * 0.12, width, height * 0.88);
+      let drawW: number, drawH: number, drawX: number, drawY: number;
+      if (vpAspect > imgAspect) {
+        // Viewport wider than image — fit width, crop height
+        drawW = width;
+        drawH = width / imgAspect;
+        drawX = 0;
+        drawY = (height - drawH) / 2;
+      } else {
+        // Viewport taller than image — fit height, crop width
+        drawH = height;
+        drawW = height * imgAspect;
+        drawX = (width - drawW) / 2;
+        drawY = 0;
+      }
 
-    // Subtle path lines (horizontal walking lanes)
-    ctx.strokeStyle = 'rgba(0,0,0,0.06)';
-    ctx.lineWidth = 2;
-    for (let i = 0; i < 6; i++) {
-      const pathY = height * 0.2 + i * height * 0.12;
-      ctx.beginPath();
-      ctx.moveTo(0, pathY);
-      ctx.lineTo(width, pathY);
-      ctx.stroke();
-    }
+      ctx.drawImage(this.bgImage, drawX, drawY, drawW, drawH);
+    } else {
+      // Fallback while image loads: simple Minecraft-style ground
+      const sky = ctx.createLinearGradient(0, 0, 0, height * 0.35);
+      sky.addColorStop(0, '#87CEEB');
+      sky.addColorStop(1, '#b8d9e8');
+      ctx.fillStyle = sky;
+      ctx.fillRect(0, 0, width, height * 0.35);
 
-    // Dirt path texture (subtle dots)
-    ctx.fillStyle = 'rgba(120, 100, 60, 0.08)';
-    for (let i = 0; i < 60; i++) {
-      const dx = (i * 137 + 50) % width;
-      const dy = height * 0.15 + ((i * 97 + 30) % (height * 0.75));
-      ctx.fillRect(dx, dy, 3, 3);
+      const ground = ctx.createLinearGradient(0, height * 0.12, 0, height);
+      ground.addColorStop(0, '#7dad5a');
+      ground.addColorStop(0.15, '#6b9b4a');
+      ground.addColorStop(0.5, '#8b9a5c');
+      ground.addColorStop(1, '#7a8850');
+      ctx.fillStyle = ground;
+      ctx.fillRect(0, height * 0.12, width, height * 0.88);
     }
 
     // === RADIAL DARKNESS (bottom-right skeleton zone) ===
