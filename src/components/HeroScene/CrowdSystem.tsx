@@ -2,17 +2,18 @@
 
 import { useRef, useMemo, useEffect } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { useGLTF, useAnimations } from '@react-three/drei';
+import { useGLTF } from '@react-three/drei';
 import * as THREE from 'three';
+import { clone as skeletonClone } from 'three/examples/jsm/utils/SkeletonUtils.js';
 
 interface CrowdSystemProps {
   proximity: number;
 }
 
 interface CrowdMember {
-  mesh: THREE.SkinnedMesh | null;
-  mixer: THREE.AnimationMixer | null;
-  action: THREE.AnimationAction | null;
+  root: THREE.Object3D;
+  mixer: THREE.AnimationMixer;
+  action: THREE.AnimationAction;
   position: THREE.Vector3;
   direction: number;
   speed: number;
@@ -21,7 +22,6 @@ interface CrowdMember {
   pathEnd: number;
   zPos: number;
   scale: number;
-  animationOffset: number;
 }
 
 export default function CrowdSystem({ proximity }: CrowdSystemProps) {
@@ -30,7 +30,6 @@ export default function CrowdSystem({ proximity }: CrowdSystemProps) {
   const membersRef = useRef<CrowdMember[]>([]);
   const targetSpeedRef = useRef(1);
 
-  // Generate crowd members
   const crowdCount = useMemo(() => {
     if (typeof window === 'undefined') return 25;
     return window.innerWidth < 640 ? 15 : 28;
@@ -38,38 +37,15 @@ export default function CrowdSystem({ proximity }: CrowdSystemProps) {
 
   // Initialize crowd
   useEffect(() => {
-    if (!scene || !animations.length) return;
+    if (!scene || !animations.length || !groupRef.current) return;
 
     const members: CrowdMember[] = [];
+    const clip = animations[0];
 
     for (let i = 0; i < crowdCount; i++) {
-      // Clone the model
-      const clone = scene.clone(true);
-
-      // Find the skinned mesh and set up animation
-      let skinnedMesh: THREE.SkinnedMesh | null = null;
-      clone.traverse((child) => {
-        if ((child as THREE.SkinnedMesh).isSkinnedMesh) {
-          skinnedMesh = child as THREE.SkinnedMesh;
-          // Desaturate the material
-          const mat = (skinnedMesh.material as THREE.MeshStandardMaterial).clone();
-          const hue = 0.55 + Math.random() * 0.15; // blue-grey range
-          const sat = 0.05 + Math.random() * 0.1;
-          mat.color.setHSL(hue, sat, 0.25 + Math.random() * 0.15);
-          mat.roughness = 0.9;
-          skinnedMesh.material = mat;
-        }
-      });
-
-      const mixer = new THREE.AnimationMixer(clone);
-      const clip = animations[0];
-      const action = mixer.clipAction(clip);
-      action.play();
-      action.time = Math.random() * clip.duration; // Random offset
-
-      // Path: horizontal, spread across scene
+      // Compute path BEFORE cloning (avoid wasting resources on skipped members)
       const goingRight = Math.random() > 0.5;
-      const zPos = -8 + Math.random() * 16; // spread across depth
+      const zPos = -8 + Math.random() * 16;
       const pathStart = goingRight ? -15 : 15;
       const pathEnd = goingRight ? 15 : -15;
       const startProgress = Math.random();
@@ -77,10 +53,31 @@ export default function CrowdSystem({ proximity }: CrowdSystemProps) {
       const speed = 0.4 + Math.random() * 0.8;
       const scale = 0.7 + Math.random() * 0.4;
 
-      // Skip characters that would overlap skeleton zone (bottom-right in 3D ~ x>3, z<0)
+      // Skip characters that would overlap skeleton zone
       if (x > 2.5 && zPos > -2 && zPos < 3 && Math.random() < 0.6) {
         continue;
       }
+
+      // Use SkeletonUtils.clone to properly clone SkinnedMesh + skeleton
+      const clone = skeletonClone(scene);
+
+      // Desaturate material on cloned meshes
+      clone.traverse((child) => {
+        if ((child as THREE.SkinnedMesh).isSkinnedMesh) {
+          const sm = child as THREE.SkinnedMesh;
+          const mat = (sm.material as THREE.MeshStandardMaterial).clone();
+          const hue = 0.55 + Math.random() * 0.15;
+          const sat = 0.05 + Math.random() * 0.1;
+          mat.color.setHSL(hue, sat, 0.25 + Math.random() * 0.15);
+          mat.roughness = 0.9;
+          sm.material = mat;
+        }
+      });
+
+      const mixer = new THREE.AnimationMixer(clone);
+      const action = mixer.clipAction(clip);
+      action.play();
+      action.time = Math.random() * clip.duration;
 
       const position = new THREE.Vector3(x, 0, zPos);
       clone.position.copy(position);
@@ -88,7 +85,7 @@ export default function CrowdSystem({ proximity }: CrowdSystemProps) {
       clone.rotation.y = goingRight ? 0 : Math.PI;
 
       members.push({
-        mesh: skinnedMesh,
+        root: clone,
         mixer,
         action,
         position,
@@ -99,18 +96,28 @@ export default function CrowdSystem({ proximity }: CrowdSystemProps) {
         pathEnd,
         zPos,
         scale,
-        animationOffset: Math.random() * 5,
       });
 
-      groupRef.current?.add(clone);
+      groupRef.current.add(clone);
     }
 
     membersRef.current = members;
 
     return () => {
-      // Cleanup
       members.forEach((m) => {
-        m.mixer?.stopAllAction();
+        m.mixer.stopAllAction();
+        // Dispose cloned materials and geometries
+        m.root.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            const mesh = child as THREE.Mesh;
+            mesh.geometry?.dispose();
+            if (Array.isArray(mesh.material)) {
+              mesh.material.forEach((mat) => mat.dispose());
+            } else {
+              (mesh.material as THREE.Material)?.dispose();
+            }
+          }
+        });
       });
       if (groupRef.current) {
         while (groupRef.current.children.length > 0) {
@@ -134,8 +141,6 @@ export default function CrowdSystem({ proximity }: CrowdSystemProps) {
     const target = targetSpeedRef.current;
 
     for (const member of membersRef.current) {
-      if (!member.mixer || !member.action) continue;
-
       // Smooth speed transition
       member.currentSpeed += (member.speed * target - member.currentSpeed) * 0.02;
 
@@ -156,16 +161,12 @@ export default function CrowdSystem({ proximity }: CrowdSystemProps) {
         member.position.x = member.pathStart;
       }
 
-      // Apply position to parent object
-      const parent = member.mesh?.parent?.parent || member.mesh?.parent;
-      if (parent) {
-        parent.position.x = member.position.x;
-      }
+      // Apply position directly to root clone
+      member.root.position.x = member.position.x;
     }
   });
 
   return <group ref={groupRef} />;
 }
 
-// Preload the model
 useGLTF.preload('/models/crowd-character.glb');

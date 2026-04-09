@@ -14,12 +14,14 @@ const vertexShader = `
 const fragmentShader = `
   varying vec2 vUv;
   void main() {
-    // Vignette centered on bottom-right
-    vec2 center = vec2(0.78, 0.72);
+    // Vignette centered on bottom-right of screen
+    // UV space: (0,0) = bottom-left, (1,1) = top-right
+    // Skeleton is at screen bottom-right → UV ~(0.75, 0.28)
+    vec2 center = vec2(0.75, 0.28);
     float dist = distance(vUv, center);
     float vignette = smoothstep(0.05, 0.55, dist);
-    // Dark at center (skeleton zone), transparent at edges
-    float alpha = (1.0 - vignette) * 0.6;
+    // Dark AROUND the skeleton (edges), clear AT the skeleton (center)
+    float alpha = vignette * 0.55;
     gl_FragColor = vec4(0.03, 0.03, 0.06, alpha);
   }
 `;

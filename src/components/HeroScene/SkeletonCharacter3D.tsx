@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useMemo } from 'react';
+import { useRef, useMemo, useEffect } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 
@@ -17,13 +17,12 @@ const EYE_GLOW = '#7dd3fc';
 export default function SkeletonCharacter3D({ activated, proximity, cursorPos }: SkeletonCharacter3DProps) {
   const groupRef = useRef<THREE.Group>(null);
   const headRef = useRef<THREE.Group>(null);
-  const leftEyeRef = useRef<THREE.Mesh>(null);
-  const rightEyeRef = useRef<THREE.Mesh>(null);
   const torsoRef = useRef<THREE.Group>(null);
+  const eyeLightRef = useRef<THREE.PointLight>(null);
   const timeRef = useRef(0);
   const eyeGlowRef = useRef(0);
-  const headTiltRef = useRef(-0.35); // Looking down initially
-  const torsoLeanRef = useRef(0.25); // Leaning back
+  const headTiltRef = useRef(-0.35);
+  const torsoLeanRef = useRef(0.25);
 
   // Materials
   const boneMat = useMemo(() => new THREE.MeshStandardMaterial({
@@ -45,6 +44,15 @@ export default function SkeletonCharacter3D({ activated, proximity, cursorPos }:
     roughness: 0.3,
   }), []);
 
+  // Dispose materials on unmount
+  useEffect(() => {
+    return () => {
+      boneMat.dispose();
+      boneShadowMat.dispose();
+      eyeMat.dispose();
+    };
+  }, [boneMat, boneShadowMat, eyeMat]);
+
   useFrame((_, delta) => {
     const dt = Math.min(delta, 0.05);
     timeRef.current += dt;
@@ -53,6 +61,11 @@ export default function SkeletonCharacter3D({ activated, proximity, cursorPos }:
     const targetGlow = activated ? 1.2 : proximity > 0.3 ? proximity * 0.8 : 0;
     eyeGlowRef.current += (targetGlow - eyeGlowRef.current) * dt * 3;
     eyeMat.emissiveIntensity = eyeGlowRef.current;
+
+    // Update eye light intensity imperatively via ref
+    if (eyeLightRef.current) {
+      eyeLightRef.current.intensity = eyeGlowRef.current * 0.5;
+    }
 
     // Head tilt — looks up when activated or proximity is high
     const targetTilt = activated ? 0 : proximity > 0.5 ? -0.1 : -0.35;
@@ -93,11 +106,9 @@ export default function SkeletonCharacter3D({ activated, proximity, cursorPos }:
         {/* Ribs - 3 pairs */}
         {[0, 1, 2].map((i) => (
           <group key={i} position={[0, 0.9 - i * 0.15, 0]}>
-            {/* Left rib */}
             <mesh position={[-0.12, 0, 0.02]} rotation={[0, 0, 0.3]} material={boneMat}>
               <capsuleGeometry args={[0.02, 0.18 - i * 0.02, 4, 6]} />
             </mesh>
-            {/* Right rib */}
             <mesh position={[0.12, 0, 0.02]} rotation={[0, 0, -0.3]} material={boneMat}>
               <capsuleGeometry args={[0.02, 0.18 - i * 0.02, 4, 6]} />
             </mesh>
@@ -109,16 +120,14 @@ export default function SkeletonCharacter3D({ activated, proximity, cursorPos }:
           <capsuleGeometry args={[0.03, 0.35, 4, 8]} />
         </mesh>
 
-        {/* Left arm (hanging down) */}
+        {/* Left arm */}
         <group position={[-0.22, 0.9, 0]}>
           <mesh position={[0, -0.2, 0]} material={boneMat}>
             <capsuleGeometry args={[0.025, 0.25, 4, 6]} />
           </mesh>
-          {/* Elbow joint */}
           <mesh position={[0, -0.35, 0]} material={boneShadowMat}>
             <sphereGeometry args={[0.03, 8, 8]} />
           </mesh>
-          {/* Forearm */}
           <mesh position={[-0.02, -0.5, 0.05]} rotation={[0.3, 0, 0.1]} material={boneMat}>
             <capsuleGeometry args={[0.02, 0.2, 4, 6]} />
           </mesh>
@@ -139,28 +148,26 @@ export default function SkeletonCharacter3D({ activated, proximity, cursorPos }:
 
         {/* Head group */}
         <group ref={headRef} position={[0, 1.15, 0]} rotation={[-0.35, 0, 0]}>
-          {/* Skull */}
           <mesh material={boneMat}>
             <sphereGeometry args={[0.22, 16, 16]} />
           </mesh>
-          {/* Jaw */}
           <mesh position={[0, -0.12, 0.08]} material={boneShadowMat}>
             <sphereGeometry args={[0.12, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2]} />
           </mesh>
 
-          {/* Left eye */}
-          <mesh ref={leftEyeRef} position={[-0.08, 0.02, 0.18]} material={eyeMat}>
+          {/* Eyes */}
+          <mesh position={[-0.08, 0.02, 0.18]} material={eyeMat}>
             <sphereGeometry args={[0.04, 12, 12]} />
           </mesh>
-          {/* Right eye */}
-          <mesh ref={rightEyeRef} position={[0.08, 0.02, 0.18]} material={eyeMat}>
+          <mesh position={[0.08, 0.02, 0.18]} material={eyeMat}>
             <sphereGeometry args={[0.04, 12, 12]} />
           </mesh>
 
-          {/* Eye glow light (only when glowing) */}
+          {/* Eye glow light — updated via ref in useFrame */}
           <pointLight
+            ref={eyeLightRef}
             position={[0, 0.02, 0.22]}
-            intensity={eyeGlowRef.current * 0.3}
+            intensity={0}
             color={EYE_GLOW}
             distance={1.5}
             decay={2}
@@ -173,18 +180,14 @@ export default function SkeletonCharacter3D({ activated, proximity, cursorPos }:
         <sphereGeometry args={[0.08, 8, 8]} />
       </mesh>
 
-      {/* Legs (extended forward for sitting) */}
       {/* Left leg */}
       <group position={[-0.08, 0.4, 0]}>
-        {/* Thigh */}
         <mesh position={[0, -0.05, 0.18]} rotation={[1.2, 0, 0]} material={boneMat}>
           <capsuleGeometry args={[0.03, 0.3, 4, 6]} />
         </mesh>
-        {/* Knee */}
         <mesh position={[0, -0.08, 0.38]} material={boneShadowMat}>
           <sphereGeometry args={[0.035, 8, 8]} />
         </mesh>
-        {/* Shin */}
         <mesh position={[0, -0.15, 0.52]} rotation={[0.4, 0, 0]} material={boneMat}>
           <capsuleGeometry args={[0.025, 0.25, 4, 6]} />
         </mesh>
