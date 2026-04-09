@@ -108,8 +108,8 @@ export class SceneSoul implements Scene {
       // Soul bob
       this.soulY += Math.sin(this.time * 1.5) * 0.5;
 
-      // Check if soul is close enough to merge
-      if (distance(soulPos, charPos) < 40 && this.soulApproaching) {
+      // Check if soul is close enough to merge (only trigger once)
+      if (distance(soulPos, charPos) < 40 && this.soulApproaching && !this.soulMerging) {
         this.soulMerging = true;
         this.soulMergeTimer = 0;
         this.audioManager?.playSFX('discovery');
