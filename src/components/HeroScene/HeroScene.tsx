@@ -7,7 +7,6 @@ import HeroEnvironment from './HeroEnvironment';
 import CrowdSystem from './CrowdSystem';
 import SkeletonCharacter3D from './SkeletonCharacter3D';
 import RadialDarkness from './RadialDarkness';
-import HeroPostProcessing from './HeroPostProcessing';
 import AmbientText from './AmbientText';
 import { useGameStore } from '@/store/gameStore';
 
@@ -20,11 +19,16 @@ export default function HeroScene({ onComplete }: HeroSceneProps) {
   const [proximity, setProximity] = useState(0);
   const [activated, setActivated] = useState(false);
   const [textPhase, setTextPhase] = useState(0);
+  const [mounted, setMounted] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const activationTimerRef = useRef(0);
   const { showSpeechBubble, hideSpeechBubble } = useGameStore();
   const completedRef = useRef(false);
-  const audioManagerRef = useRef<{ playSFX: (t: string) => void } | null>(null);
+
+  // Only render Canvas after mount (prevents SSR/hydration issues)
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   // Track skeleton screen position (bottom-right)
   const getSkeletonScreenPos = useCallback(() => {
@@ -93,6 +97,10 @@ export default function HeroScene({ onComplete }: HeroSceneProps) {
     return () => timers.forEach(clearTimeout);
   }, [activated]);
 
+  if (!mounted) {
+    return <div className="fixed inset-0 bg-[#08080f]" />;
+  }
+
   return (
     <div
       ref={containerRef}
@@ -102,8 +110,10 @@ export default function HeroScene({ onComplete }: HeroSceneProps) {
       <Canvas
         camera={{ position: [0, 2.5, 12], fov: 45 }}
         dpr={[1, 1.5]}
-        gl={{ antialias: true, alpha: false }}
         style={{ background: '#08080f' }}
+        onCreated={({ gl }) => {
+          gl.setClearColor('#08080f');
+        }}
       >
         <HeroEnvironment proximity={proximity} />
         <CrowdSystem proximity={proximity} />
@@ -113,7 +123,6 @@ export default function HeroScene({ onComplete }: HeroSceneProps) {
           cursorPos={cursorPos}
         />
         <RadialDarkness />
-        <HeroPostProcessing />
         <Preload all />
       </Canvas>
 
